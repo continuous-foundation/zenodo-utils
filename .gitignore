@@ -35,3 +35,6 @@ _build
 
 src/version.ts
 .env
+
+.yalc
+yalc.lock
