@@ -3,17 +3,18 @@ import fs from 'node:fs';
 import { load as yamlLoad } from 'js-yaml';
 import { Command, Option } from 'commander';
 import inquirer from 'inquirer';
-import type { UploadType, Contributor as ContributorZ, DepositionMetadata } from '../index.js';
+import type { UploadType, Contributor as ZenodoContributor, DepositionMetadata } from '../index.js';
 import { ZenodoClient } from '../index.js';
 import type { ISession } from 'myst-cli';
 import {
+  castSession,
   filterPages,
   findCurrentProjectAndLoad,
   getFileContent,
   loadConfig,
   loadProject,
-  parseMyst,
   processProject,
+  resolveFrontmatterParts,
   selectors,
   Session,
 } from 'myst-cli';
@@ -22,12 +23,16 @@ import { extractPart, plural } from 'myst-common';
 import { mystToHtml } from 'myst-to-html';
 import type { Affiliation, Contributor, ProjectFrontmatter } from 'myst-frontmatter';
 import { clirun } from 'myst-cli-utils';
-import { addZenodoToConfig } from './utils.js';
+import { addDoiToConfig, addZenodoToConfig } from './utils.js';
+
+const DEPOSIT_FILE_EXTENSIONS = ['.pdf', '.pptx', '.png'];
 
 type DepositOptions = {
   type?: UploadType;
   file?: string;
   sandbox?: boolean;
+  community?: string;
+  publish?: boolean;
 };
 
 type DepositSource = {
@@ -47,18 +52,28 @@ export async function depositArticleFromSource(session: ISession, depositSource:
   let frontmatter: ProjectFrontmatter | undefined;
   const dois: Record<string, string> = {};
   if (depositFile === configFile) {
-    const { pages } = await loadProject(session, projectPath);
-    const fileContents = await getFileContent(
-      session,
-      pages.map(({ file }) => file),
-      { projectPath, imageExtensions: [] },
-    );
+    let fileContents: Awaited<ReturnType<typeof getFileContent>>;
+    try {
+      const { pages } = await loadProject(session, projectPath);
+      fileContents = await getFileContent(
+        session,
+        pages.map(({ file }) => file),
+        { projectPath, imageExtensions: [] },
+      );
+    } catch (error) {
+      fileContents = [];
+    }
     if (projectFrontmatter?.parts?.abstract) {
-      abstractPart = parseMyst(session, projectFrontmatter.parts.abstract.join('\n\n'), configFile);
+      const abstractContent = castSession(session).$getMdast(
+        projectFrontmatter.parts.abstract[0],
+      )?.pre;
+      abstractPart = abstractContent?.mdast;
     } else {
-      fileContents.forEach(({ mdast }) => {
+      fileContents.forEach(({ mdast, frontmatter: fileFrontmatter }) => {
         if (abstractPart) return;
-        abstractPart = extractPart(mdast, 'abstract');
+        abstractPart = extractPart(mdast, 'abstract', {
+          frontmatterParts: resolveFrontmatterParts(session, fileFrontmatter),
+        });
       });
     }
     fileContents.forEach(({ references }) => {
@@ -166,11 +181,7 @@ async function getDepositSources(
   return depositSources;
 }
 
-function issueDataFromArticles(
-  session: ISession,
-  articles: { frontmatter: ProjectFrontmatter }[],
-  opts: DepositOptions,
-) {
+function issueDataFromArticles(articles: { frontmatter: ProjectFrontmatter }[]) {
   let venueTitle: string | undefined;
   let venueAbbr: string | undefined;
   let venueDoi: string | undefined;
@@ -345,7 +356,7 @@ function issueDataFromArticles(
 
 async function deposit(session: Session, opts: DepositOptions) {
   let { type: depositType } = opts;
-  const { sandbox } = opts;
+  const { sandbox, community, publish } = opts;
   const client = new ZenodoClient(process.env.ZENODO_TOKEN, sandbox);
   if (!depositType) {
     const choices: { name: string; value: UploadType }[] = [
@@ -385,36 +396,56 @@ async function deposit(session: Session, opts: DepositOptions) {
     `🔍 Found ${plural('%s article(s)', depositArticles)} for ${depositType} deposit`,
   );
   const { venueTitle, venueAbbr, venueUrl, eventDate, eventLocation, publicationEditors } =
-    issueDataFromArticles(session, depositArticles, opts);
+    issueDataFromArticles(depositArticles);
 
   for (let index = 0; index < depositArticles.length; index++) {
-    const article = depositArticles[index];
-    let zenodoDepositId = getZenodoId(article.configFile);
-    if (!article.frontmatter.title) throw new Error('The deposit must have a title');
-    if (!article.abstract) throw new Error('The deposit must have an abstract');
+    const { configFile, frontmatter, abstract, project } = depositArticles[index];
+    session.log.info(`\nProcessing: "${frontmatter.title}"`);
+    if (!configFile) {
+      throw new Error(`No config file found for source: ${frontmatter.title}`);
+    }
+    let zenodoDepositId = getZenodoId(configFile);
+    if (!zenodoDepositId) {
+      const createdData = await client.createEmptyDeposition();
+      zenodoDepositId = createdData.id;
+      session.log.debug(JSON.stringify(createdData, null, 2));
+      session.log.info(`🎉 Created deposit ${zenodoDepositId}: ${createdData.links.html}`);
+      addZenodoToConfig(configFile, zenodoDepositId, sandbox);
+    } else {
+      session.log.info(`🔍 Found existing deposit ID ${zenodoDepositId}`);
+    }
+    const existingData = await client.getDeposition(zenodoDepositId);
+    if (existingData.submitted) {
+      throw new Error(`Deposit ${zenodoDepositId} already submitted`);
+    }
+    if (!frontmatter.title) throw new Error('The deposit must have a title');
+    if (!abstract) throw new Error('The deposit must have an abstract');
     const data: DepositionMetadata = {
-      title: article.frontmatter.title,
-      description: article.abstract,
+      title: frontmatter.title,
+      description: abstract,
       upload_type: depositType,
-      publication_date: article.frontmatter.date,
+      publication_date: frontmatter.date,
       imprint_publisher: venueAbbr || venueTitle,
       creators:
-        article.frontmatter.authors?.map((a) => ({
+        frontmatter.authors?.map((a) => ({
           // TODO: improve this for non-western name, particles, etc.
           name: `${a.nameParsed?.family}, ${a.nameParsed?.given}` as string,
           affiliation: a.affiliations
-            ?.map((aff) => article.frontmatter.affiliations?.find((test) => test.id === aff))
+            ?.map((aff) => frontmatter.affiliations?.find((test) => test.id === aff))
             ?.map((aff) => aff?.name)
             ?.filter((aff) => !!aff)
             .join(', '),
           orcid: a.orcid,
         })) ?? [],
-      doi: article.frontmatter.doi,
+      doi: frontmatter.doi,
     };
-    if (depositType === 'presentation') {
+    if (community) {
+      data.communities = [{ identifier: community }];
+    }
+    if (depositType === 'presentation' || depositType === 'poster') {
       data.conference_title = venueTitle;
       data.contributors = publicationEditors?.map(
-        (e): ContributorZ => ({
+        (e): ZenodoContributor => ({
           type: 'Editor',
           name: e.name as string,
           orcid: e.orcid,
@@ -425,38 +456,52 @@ async function deposit(session: Session, opts: DepositOptions) {
       data.conference_url = venueUrl;
       data.conference_dates = eventDate;
       data.conference_place = eventLocation;
-      if (article.frontmatter.github) {
+      if (frontmatter.github) {
         data.custom = {
-          'code:codeRepository': article.frontmatter.github,
+          'code:codeRepository': frontmatter.github,
         };
       }
     }
-    if (zenodoDepositId) {
-      const depositData = await client.updateDeposition(zenodoDepositId, data);
-      session.log.debug(JSON.stringify(depositData, null, 2));
+    session.log.debug(JSON.stringify(data, null, 2));
+    const updatedData = await client.updateDeposition(zenodoDepositId, data);
+    session.log.debug(JSON.stringify(updatedData, null, 2));
+    session.log.info(`✍️ Updated deposit ${zenodoDepositId}: ${updatedData.links.html}`);
+    if (updatedData.files?.length) {
       session.log.info(
-        `Updating a deposit with ${zenodoDepositId}. See the record at:\n${depositData.links.html}`,
+        `🛑 Skipping files - deposit already has ${plural('%s file(s)', updatedData.files)} uploaded`,
       );
     } else {
-      const depositData = await client.createDeposition(data);
-      zenodoDepositId = depositData.id as number;
-      session.log.debug(JSON.stringify(depositData, null, 2));
-      session.log.info(
-        `Creating a deposit with ${zenodoDepositId}. See the record at:\n${depositData.links.html}`,
-      );
-      addZenodoToConfig(article.configFile, zenodoDepositId, sandbox);
-    }
-    for (let jj = 0; jj < (article.project?.downloads?.length ?? 0); jj++) {
-      const download = article.project?.downloads?.[jj];
-      if (download?.url) {
-        const relativePath = path.join(path.dirname(article.configFile as string), download.url);
+      let filesToUpload = project?.downloads
+        ?.map((download) => download?.url)
+        .filter((download): download is string => !!download)
+        .map((download) => path.resolve(path.dirname(configFile), download));
+      if (!filesToUpload?.length) {
+        filesToUpload = fs
+          .readdirSync(path.dirname(configFile))
+          .filter((file) => DEPOSIT_FILE_EXTENSIONS.find((ext) => file.toLowerCase().endsWith(ext)))
+          .map((file) => path.resolve(path.dirname(configFile), file));
+      }
+      if (!filesToUpload?.length) {
+        throw new Error(`🚨 No files found to upload for deposit ${zenodoDepositId}`);
+      }
+      session.log.info(`🔍 Found ${plural('%s file(s)', filesToUpload)} to upload`);
+      for (let jj = 0; jj < filesToUpload.length; jj++) {
+        session.log.debug(`Uploading ${filesToUpload[jj]}`);
         try {
-          const file = await client.uploadFile(zenodoDepositId, relativePath);
+          await client.uploadFile(existingData.links.bucket, filesToUpload[jj]);
         } catch (error) {
           session.log.warn('Error writing file, trying again!');
-          const file = await client.uploadFile(zenodoDepositId, relativePath);
+          await client.uploadFile(existingData.links.bucket, filesToUpload[jj]);
         }
       }
+    }
+    if (publish) {
+      const publishedData = await client.publishDeposition(zenodoDepositId);
+      session.log.debug(JSON.stringify(publishedData, null, 2));
+      if (!frontmatter.doi) {
+        addDoiToConfig(configFile, publishedData.metadata.doi);
+      }
+      session.log.info(`🚀 Published deposit ${zenodoDepositId}: ${publishedData.links.html}`);
     }
   }
 }
@@ -480,12 +525,7 @@ function makeDepositCLI(program: Command) {
     .addOption(
       new Option('--type <value>', 'Deposit type').choices(choices).default('presentation'),
     )
-    // .addOption(new Option('--id <value>', 'Deposit batch id'))
-    // .addOption(new Option('--name <value>', 'Depositor name').default('Curvenote'))
-    // .addOption(new Option('--email <value>', 'Depositor email').default('doi@curvenote.com'))
-    // .addOption(new Option('--registrant <value>', 'Registrant organization').default('Crossref'))
-    // .addOption(new Option('-o, --output <value>', 'Output file'))
-    // .addOption(new Option('--prefix <value>', 'Prefix for new DOIs'))
+    .addOption(new Option('--community <value>', 'Zenodo community identifier'))
     .addOption(new Option('--sandbox', 'Use the sandbox for testing purposes'))
     .addOption(new Option('--publish', 'Publish the resource'))
     .action(clirun(deposit, { program, getSession: (logger) => new Session({ logger }) }));
@@ -500,9 +540,9 @@ function getZenodoId(configFile: string | undefined): number | undefined {
   // This shouldn't be needed in the future
   if (!configFile) return undefined;
   const data = yamlLoad(fs.readFileSync(configFile).toString()) as {
-    project: { zenodo?: string };
+    project: { identifiers?: { zenodo?: string } };
   };
-  const url = data?.project?.zenodo;
+  const url = data?.project?.identifiers?.zenodo;
   if (!url) return undefined;
   return Number.parseInt(String(url).split('/').slice(-1)[0], 10);
 }

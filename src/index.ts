@@ -538,6 +538,17 @@ export interface DepositionMetadata {
   };
 }
 
+export type Deposition = {
+  id: number;
+  submitted: boolean;
+  metadata: DepositionMetadata;
+  links: {
+    self: string;
+    html: string;
+    bucket: string;
+  };
+};
+
 export class ZenodoClient {
   private accessToken: string;
   private axiosInstance: AxiosInstance;
@@ -563,6 +574,27 @@ export class ZenodoClient {
    * Create a new deposition with the provided metadata.
    * @param metadata Deposition metadata
    */
+  public async createEmptyDeposition(): Promise<Deposition> {
+    try {
+      const response = await this.axiosInstance.post(
+        '/deposit/depositions',
+        {},
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+      return response.data;
+    } catch (error: any) {
+      this.handleError(error);
+    }
+  }
+
+  /**
+   * Create a new deposition with the provided metadata.
+   * @param metadata Deposition metadata
+   */
   public async createDeposition(metadata: DepositionMetadata): Promise<any> {
     try {
       const response = await this.axiosInstance.post(
@@ -574,6 +606,19 @@ export class ZenodoClient {
           },
         },
       );
+      return response.data;
+    } catch (error: any) {
+      this.handleError(error);
+    }
+  }
+
+  /**
+   * Get a deposition by ID.
+   * @param depositionId ID of the deposition
+   */
+  public async getDeposition(depositionId: number): Promise<Deposition> {
+    try {
+      const response = await this.axiosInstance.get(`/deposit/depositions/${depositionId}`);
       return response.data;
     } catch (error: any) {
       this.handleError(error);
@@ -606,23 +651,19 @@ export class ZenodoClient {
    * @param depositionId ID of the deposition
    * @param filePath Path to the file to upload
    */
-  public async uploadFile(depositionId: number, filePath: string): Promise<any> {
+  public async uploadFile(bucketUrl: string, filePath: string): Promise<any> {
     try {
-      // Get the deposition to retrieve the bucket URL
-      const deposition = await this.axiosInstance.get(`/deposit/depositions/${depositionId}`);
-      const bucketUrl: string = deposition.data.links.bucket;
-
-      // Step 2: Prepare the file for upload
+      // Prepare the file for upload
       const fileName = path.basename(filePath);
       const url = `${bucketUrl}/${encodeURIComponent(fileName)}`;
 
       const fileStream = fs.createReadStream(filePath);
 
-      // Step 3: Calculate the file size
+      // Calculate the file size
       const stats = fs.statSync(filePath);
       const fileSizeInBytes = stats.size;
 
-      // Step 4: Set the appropriate headers and config
+      // Set the appropriate headers and config
       const response = await axios.put(url, fileStream, {
         headers: {
           'Content-Type': 'application/octet-stream', // or the actual MIME type of your file
@@ -673,7 +714,7 @@ export class ZenodoClient {
    * Handle API errors.
    * @param error Error object
    */
-  private handleError(error: any): void {
+  private handleError(error: any): never {
     if (error.response) {
       console.error('API Error:', error.response.status, error.response.data);
       throw new Error(`API Error: ${error.response.status} ${JSON.stringify(error.response.data)}`);
