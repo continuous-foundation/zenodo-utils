@@ -34,9 +34,9 @@ export function addZenodoToConfig(
 }
 
 /**
- * Add Zenodo ID to project identifiers in config file
+ * Add DOI to project in config file
  *
- * This function assumes there is no zenodo identifier present
+ * This function assumes there is no DOI present
  */
 export function addDoiToConfig(configFile: string | undefined, doi: string) {
   if (!configFile) return;
