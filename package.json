@@ -1,6 +1,6 @@
 {
   "name": "zenodo-utils",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Utilities for working with zenodo",
   "author": "Rowan Cockett <rowan@continuous.foundation>",
   "homepage": "https://github.com/continuous-foundation/zenodo-utils",
