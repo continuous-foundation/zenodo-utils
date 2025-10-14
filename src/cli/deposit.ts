@@ -138,27 +138,31 @@ async function getDepositSources(
   projectPath = selectors.selectCurrentProjectPath(state);
   const configFile = selectors.selectCurrentProjectFile(state);
   if (projectPath && configFile) {
-    const project = await processProject(
-      session,
-      { path: projectPath },
-      {
-        imageExtensions: [],
-        writeFiles: false,
-      },
-    );
-    const pages = filterPages(project);
-    if (pages.length === 0) throw new Error('No MyST pages found');
-    const resp = await inquirer.prompt([
-      {
-        name: 'depositFile',
-        type: 'list',
-        message: 'File:',
-        choices: [{ file: configFile }, ...filterPages(project)].map(({ file }) => {
-          return { name: path.relative('.', file), value: file };
-        }),
-      },
-    ]);
-    depositFile = resp.depositFile;
+    try {
+      const project = await processProject(
+        session,
+        { path: projectPath },
+        {
+          imageExtensions: [],
+          writeFiles: false,
+        },
+      );
+      const pages = filterPages(project);
+      if (pages.length === 0) throw new Error('No MyST pages found');
+      const resp = await inquirer.prompt([
+        {
+          name: 'depositFile',
+          type: 'list',
+          message: 'File:',
+          choices: [{ file: configFile }, ...filterPages(project)].map(({ file }) => {
+            return { name: path.relative('.', file), value: file };
+          }),
+        },
+      ]);
+      depositFile = resp.depositFile;
+    } catch (error) {
+      depositFile = configFile;
+    }
     return [{ projectPath, depositFile }];
   }
   // If there is no project on the current path, load all projects in child folders
