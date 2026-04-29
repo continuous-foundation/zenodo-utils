@@ -2,7 +2,7 @@
   "name": "zenodo-utils",
   "version": "0.0.1",
   "description": "Utilities for working with zenodo",
-  "author": "Rowan Cockett <rowan@continuous.foundation>",
+  "author": "Rowan Cockett <rowan@continuousfoundation.org>",
   "homepage": "https://github.com/continuous-foundation/zenodo-utils",
   "sideEffects": false,
   "type": "module",
