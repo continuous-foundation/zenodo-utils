@@ -50,7 +50,7 @@ export async function depositArticleFromSource(session: ISession, depositSource:
     const { pages } = await loadProject(session, projectPath);
     const fileContents = await getFileContent(
       session,
-      pages.map(({ file }) => file),
+      pages.map(({ file }) => file).filter((file) => file !== 'unknown'),
       { projectPath, imageExtensions: [] },
     );
     if (projectFrontmatter?.parts?.abstract) {
@@ -146,11 +146,19 @@ async function getDepositSources(
     depositFile = resp.depositFile;
     return [{ projectPath, depositFile }];
   }
-  // If there is no project on the current path, load all projects in child folders
+  // If there is no project on the current path, load all projects in child folders (up to two levels deep)
   const subdirs = fs
     .readdirSync('.')
     .map((item) => path.resolve(item))
-    .filter((item) => fs.lstatSync(item).isDirectory());
+    .filter((item) => fs.lstatSync(item).isDirectory())
+    .map((dir) => {
+      const files = fs.readdirSync(dir);
+      if (files.includes('myst.yml') || files.includes('curvenote.yml')) return dir;
+      return files
+        .map((item) => path.join(dir, item))
+        .filter((item) => fs.lstatSync(item).isDirectory());
+    })
+    .flat();
   const depositSources = (
     await Promise.all(
       subdirs.map(async (dir) => {
@@ -411,7 +419,7 @@ async function deposit(session: Session, opts: DepositOptions) {
         })) ?? [],
       doi: article.frontmatter.doi,
     };
-    if (depositType === 'presentation') {
+    if (depositType === 'presentation' || depositType === 'poster') {
       data.conference_title = venueTitle;
       data.contributors = publicationEditors?.map(
         (e): ContributorZ => ({
@@ -477,9 +485,7 @@ function makeDepositCLI(program: Command) {
   const command = new Command('deposit')
     .description('Create Zenodo deposit XML from local MyST content')
     .addOption(new Option('--file <value>', 'File to deposit'))
-    .addOption(
-      new Option('--type <value>', 'Deposit type').choices(choices).default('presentation'),
-    )
+    .addOption(new Option('--type <value>', 'Deposit type').choices(choices))
     // .addOption(new Option('--id <value>', 'Deposit batch id'))
     // .addOption(new Option('--name <value>', 'Depositor name').default('Curvenote'))
     // .addOption(new Option('--email <value>', 'Depositor email').default('doi@curvenote.com'))
