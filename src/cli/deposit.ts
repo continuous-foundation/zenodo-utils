@@ -331,9 +331,10 @@ function issueDataFromArticles(articles: { frontmatter: ProjectFrontmatter }[]) 
         .filter((editor): editor is Contributor => !!editor)
         .map((editor) => ({
           ...editor,
-          affiliations: editor.affiliations?.map((aff) =>
-            affiliations?.find((test) => test.id === aff),
-          ) as Affiliation[],
+          affiliations:
+            editor.affiliations
+              ?.map((aff) => affiliations?.find((test) => test.id === aff))
+              .filter((aff): aff is Affiliation => !!aff) ?? [],
         })) ?? []) as (Contributor & { affiliations: Affiliation[] })[];
     }
   });
